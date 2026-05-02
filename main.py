@@ -776,6 +776,9 @@ async def chat_completions(request: Request):
                     client_new_msgs.append(last_msg)
         all_msgs = db_msgs + client_new_msgs
         
+        # 同步更新tool_messages，避免process_memories_background存重复的旧tool
+        tool_messages = [m for m in client_new_msgs if m.get("role") == "tool"]
+        
         print(f"📦 分区模式: DB历史{len(db_msgs)}条 + 客户端消息{len(client_new_msgs)}条")
         
         messages = await build_partitioned_messages(
