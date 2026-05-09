@@ -267,6 +267,33 @@ def build_time_injection() -> str:
     return f"【当前时间】{time_str} {weekday}"
 
 
+def _is_anthropic_model(model: str) -> bool:
+    """判断是否为 Anthropic Claude 系列模型（只有 Claude 支持 cache_control）"""
+    model_lower = model.lower()
+    return "claude" in model_lower or "anthropic" in model_lower
+
+
+def _strip_cache_control(messages: list):
+    """
+    剥掉消息中的 cache_control 字段，非 Claude 模型用不了。
+    如果 content 数组只剩纯文本 block，降级回字符串格式。
+    """
+    stripped = 0
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and "cache_control" in block:
+                del block["cache_control"]
+                stripped += 1
+        # 只有一个 text block 时降级回纯字符串（兼容性最好）
+        if len(content) == 1 and isinstance(content[0], dict) and content[0].get("type") == "text":
+            msg["content"] = content[0]["text"]
+    if stripped > 0:
+        print(f"🔧 兼容性处理: 剥离了 {stripped} 个 cache_control 字段（非 Claude 模型）")
+
+
 async def generate_summary(messages: list, session_id: str = "") -> str:
     """调用轻量模型压缩A区消息为摘要"""
     if not messages:
@@ -899,6 +926,13 @@ async def chat_completions(request: Request):
     if not model:
         model = DEFAULT_MODEL
     body["model"] = model
+    
+    # ---------- cache_control 兼容性处理 ----------
+    # cache_control 是 Anthropic Claude API 专有参数，非 Claude 模型不认识
+    # 分区缓存模式下会把 content 转成带 cache_control 的数组格式，
+    # 对于非 Claude 模型需要剥掉 cache_control 并将纯文本 content 降级回字符串
+    if CACHE_PARTITION_ENABLED and not _is_anthropic_model(model):
+        _strip_cache_control(body.get("messages", []))
     
     # ---------- 转发请求 ----------
     headers = {

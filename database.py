@@ -10,8 +10,12 @@
 import os
 import re
 from typing import Optional, List
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 import asyncpg
+
+# 时区偏移（和 main.py 保持一致）
+TIMEZONE_HOURS = int(os.getenv("TIMEZONE_HOURS", "8"))
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
@@ -1439,29 +1443,40 @@ async def import_conversations(records: list):
 
 async def get_fragments_by_date(event_date):
     """获取指定日期的原始碎片（用于每日整理）"""
+    # 把本地日期转成UTC时间范围，避免DATE()用UTC截断导致日期偏移
+    local_tz = dt_timezone(timedelta(hours=TIMEZONE_HOURS))
+    start_utc = datetime(event_date.year, event_date.month, event_date.day, tzinfo=local_tz).astimezone(dt_timezone.utc)
+    end_utc = start_utc + timedelta(days=1)
+    
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT id, content, importance, created_at
             FROM memories
             WHERE layer = 1 AND is_active = TRUE
-            AND DATE(created_at) = $1
+            AND created_at >= $1 AND created_at < $2
             ORDER BY created_at
-        """, event_date)
+        """, start_utc, end_utc)
         return [dict(r) for r in rows]
 
 
 async def get_fragments_by_date_range(start_date, end_date):
     """获取指定时间段的原始碎片（用于跨天整理）"""
+    # 把本地日期转成UTC时间范围，避免DATE()用UTC截断导致日期偏移
+    local_tz = dt_timezone(timedelta(hours=TIMEZONE_HOURS))
+    start_utc = datetime(start_date.year, start_date.month, start_date.day, tzinfo=local_tz).astimezone(dt_timezone.utc)
+    # end_date 当天结束 = end_date 下一天的 00:00
+    end_utc = datetime(end_date.year, end_date.month, end_date.day, tzinfo=local_tz).astimezone(dt_timezone.utc) + timedelta(days=1)
+    
     pool = await get_pool()
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
             SELECT id, content, importance, created_at
             FROM memories
             WHERE layer = 1 AND is_active = TRUE
-            AND DATE(created_at) BETWEEN $1 AND $2
+            AND created_at >= $1 AND created_at < $2
             ORDER BY created_at
-        """, start_date, end_date)
+        """, start_utc, end_utc)
         return [dict(r) for r in rows]
 
 
