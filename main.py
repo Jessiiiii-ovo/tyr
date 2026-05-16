@@ -585,9 +585,11 @@ async def build_partitioned_messages(
         parts.append(current_text)
         result.append({"role": "user", "content": "\n\n".join(parts)})
     
-    bp_count = 1 + (1 if summary_parts else 0) + (1 if a_msgs else 0) + (1 if b_msgs else 0)
+    bp_count = 1 + (1 if summary_parts else 0) + (1 if cleaned_a else 0) + (1 if b_msgs else 0)
     summary_total = sum(len(p) for p in summary_parts)
-    print(f"🔒 分区缓存: BP×{bp_count} | 摘要{'有' if summary_parts else '无'}({len(summary_parts)}段/{summary_total}字) | A区{len(a_msgs)}条({len(a_round_groups)}轮) | B区{len(b_msgs)}条({b_rounds_count}轮) | 总{len(result)}条messages")
+    tool_stripped = len(a_msgs) - len(cleaned_a)
+    a_info = f"A区{len(cleaned_a)}条({len(a_round_groups)}轮)" + (f"[剥离{tool_stripped}条tool]" if tool_stripped else "")
+    print(f"🔒 分区缓存: BP×{bp_count} | 摘要{'有' if summary_parts else '无'}({len(summary_parts)}段/{summary_total}字) | {a_info} | B区{len(b_msgs)}条({b_rounds_count}轮) | 总{len(result)}条messages")
     return result
 
 
@@ -938,6 +940,13 @@ async def chat_completions(request: Request):
         client_new_msgs = [m for m in messages if m.get("role") != "system"]
         # 分区模式下，assistant消息来自上一轮response（DB里已存），过滤掉避免重复
         client_new_msgs = [m for m in client_new_msgs if m.get("role") != "assistant"]
+        # 分区模式下DB已有完整历史，客户端发来的旧user是冗余的，只保留最后一条
+        user_msgs = [m for m in client_new_msgs if m.get("role") == "user"]
+        if len(user_msgs) > 1:
+            last_user = user_msgs[-1]
+            client_new_msgs = [m for m in client_new_msgs if m.get("role") != "user"]
+            client_new_msgs.append(last_user)
+            print(f"🔧 去重: 过滤{len(user_msgs)-1}条冗余user，保留最后1条")
         # 工具结果轮次处理：基于DB状态 + 当前轮次tool_call_id精确判断
         client_tools = [m for m in client_new_msgs if m.get("role") == "tool"]
         if client_tools:
