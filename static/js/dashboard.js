@@ -502,6 +502,7 @@ async function batchSave() {
             showManageMsg('error', '❌ ' + data.error);
         } else {
             showManageMsg('success', '✅ 已保存 ' + data.updated + ' 条');
+            clearSelection();
             loadMemories();
         }
     } catch(e) {
@@ -524,6 +525,7 @@ async function batchDelete() {
             showManageMsg('error', '❌ ' + data.error);
         } else {
             showManageMsg('success', '✅ 已删除 ' + data.deleted + ' 条');
+            clearSelection();
             loadMemories();
         }
     } catch(e) {
@@ -685,6 +687,7 @@ async function doMerge() {
         } else {
             showManageMsg('success', '✅ 已合并 ' + data.merged + ' 条为新记忆 #' + data.new_id);
             closeMergeModal();
+            clearSelection();
             loadMemories();
         }
     } catch(e) {
@@ -1259,7 +1262,7 @@ async function loadConvMessages(sessionId, append = false) {
                     <span style="font-weight: 500; font-size: 13px;">${roleLabel}</span>
                     <div style="display: flex; align-items: center; gap: 8px;">
                         <span style="color: var(--text-muted); font-size: 12px;">${timeStr}</span>
-                        ${msgId ? `<button class="btn btn-sm" onclick="toggleEditMessage(${msgId})" style="font-size: 11px; padding: 2px 8px;">编辑</button>` : ''}
+                        ${msgId ? `<button class="btn btn-sm" onclick="toggleEditMessage(${msgId})" style="font-size: 11px; padding: 2px 8px;">编辑</button><button class="btn btn-sm" onclick="deleteSingleMessage(${msgId})" style="font-size: 11px; padding: 2px 8px; color: var(--error);">删除</button>` : ''}
                     </div>
                 </div>
                 <div class="msg-content" id="msg-content-${msgId}" style="white-space: pre-wrap; word-break: break-word; font-size: 14px; line-height: 1.6;">${content}</div>
@@ -1337,6 +1340,32 @@ async function saveMessageEdit(msgId) {
         const contentEl = document.getElementById('msg-content-' + msgId);
         contentEl.textContent = newContent;
         toggleEditMessage(msgId);
+    } catch(e) {
+        alert('请求失败: ' + e.message);
+    }
+}
+
+// 删除单条消息
+async function deleteSingleMessage(msgId) {
+    if (!confirm('确定删除这条消息？此操作不可撤销。')) return;
+    try {
+        const resp = await fetch('/api/messages/' + msgId, { method: 'DELETE' });
+        const data = await resp.json();
+        if (data.error) {
+            alert('删除失败: ' + data.error);
+            return;
+        }
+        const msgEl = document.getElementById('msg-' + msgId);
+        if (msgEl) msgEl.remove();
+        const titleEl = document.getElementById('conv-detail-title');
+        if (titleEl) {
+            const m = titleEl.textContent.match(/(\d+)\s*\/\s*(\d+)/);
+            if (m) {
+                const loaded = parseInt(m[1]) - 1;
+                const total = parseInt(m[2]) - 1;
+                titleEl.textContent = `对话详情（${loaded} / ${total} 条消息）`;
+            }
+        }
     } catch(e) {
         alert('请求失败: ' + e.message);
     }
@@ -1549,6 +1578,7 @@ function renderThreadList(threads) {
                     <button class="btn btn-sm" onclick="renameThread('${t.session_id}')">改名</button>
                     <button class="btn btn-sm" onclick="openSummaryModal('${t.session_id}')">摘要</button>
                     ${!isActive ? `<button class="btn btn-sm btn-primary" onclick="switchThread('${t.session_id}')">切换到此</button>` : ''}
+                    ${!isActive ? `<button class="btn btn-sm" onclick="deleteThread('${t.session_id}')" style="color: var(--error);">删除</button>` : ''}
                 </div>
             </div>
             <div style="color: var(--text-muted); font-size: 13px; line-height: 1.5;">
@@ -1639,6 +1669,22 @@ async function switchThread(sessionId) {
         const data = await resp.json();
         if (data.error) {
             alert('切换失败: ' + data.error);
+            return;
+        }
+        loadThreads();
+    } catch(e) {
+        alert('请求失败: ' + e.message);
+    }
+}
+
+async function deleteThread(sessionId) {
+    if (!confirm(`确定删除对话线「${sessionId}」吗？\n\n这只会删除对话线配置和摘要，已有的对话消息不受影响。`)) return;
+    
+    try {
+        const resp = await fetch('/api/partition/thread/' + encodeURIComponent(sessionId), { method: 'DELETE' });
+        const data = await resp.json();
+        if (data.error) {
+            alert('删除失败: ' + data.error);
             return;
         }
         loadThreads();
