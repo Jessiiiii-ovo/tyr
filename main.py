@@ -284,15 +284,10 @@ async def gateway_auth_middleware(request: Request, call_next):
         return await call_next(request)
 
     # 从 header 或 query 参数获取密钥
-
-    if authorization.lower().startswith("bearer "):
-        bearer_key = authorization[7:].strip()
-
     provided_key = (
-        request.headers.get("X-Gateway-Key", "")
-        or bearer_key
-        or request.query_params.get("gateway_key", "")
-    )
+    request.headers.get("X-Gateway-Key", "")
+    or request.query_params.get("gateway_key", "")
+    )   
 
     # compare_digest 防时序侧信道攻击
     if not secrets.compare_digest(provided_key, GATEWAY_SECRET):
@@ -1115,10 +1110,17 @@ async def chat_completions(request: Request):
         body["messages"] = messages
     
     # ---------- 模型处理 ----------
-    model = body.get("model", DEFAULT_MODEL)
-    if not model:
-        model = DEFAULT_MODEL
+    client_model = body.get("model", DEFAULT_MODEL) or DEFAULT_MODEL
+
+    MODEL_ALIASES = {
+        "anthropic/claude-sonnet-4.5": "claude-sonnet-4-5-20250929",
+    }
+
+    model = MODEL_ALIASES.get(client_model, client_model)
     body["model"] = model
+
+    if model != client_model:
+        print(f"🔄 模型映射: {client_model} → {model}")
     
     # ---------- cache_control 兼容性处理 ----------
     if CACHE_PARTITION_ENABLED and not _is_anthropic_model(model):
