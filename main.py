@@ -284,8 +284,15 @@ async def gateway_auth_middleware(request: Request, call_next):
         return await call_next(request)
 
     # 从 header 或 query 参数获取密钥
+    authorization = request.headers.get("Authorization", "")
+    bearer_key = ""
+
+    if authorization.lower().startswith("bearer "):
+        bearer_key = authorization[7:].strip()
+
     provided_key = (
         request.headers.get("X-Gateway-Key", "")
+        or bearer_key
         or request.query_params.get("gateway_key", "")
     )
 
