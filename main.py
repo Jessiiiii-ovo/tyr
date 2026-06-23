@@ -1113,7 +1113,7 @@ async def chat_completions(request: Request):
     client_model = body.get("model", DEFAULT_MODEL) or DEFAULT_MODEL
 
     MODEL_ALIASES = {
-        "anthropic/claude-sonnet-4.5": "claude-sonnet-4-5-20250929",
+        "anthropic/claude-sonnet-4.5": "claude-opus-4-5",
     }
 
     model = MODEL_ALIASES.get(client_model, client_model)
