@@ -1084,8 +1084,12 @@ async def chat_completions(request: Request):
         
         print(f"📦 分区模式: DB历史{len(db_msgs)}条 + 客户端消息{len(client_new_msgs)}条")
         
+        current_system_prompt = await get_system_prompt()
         messages = await build_partitioned_messages(
-            session_id, all_msgs, SYSTEM_PROMPT, user_message
+            session_id,
+            all_msgs,
+            current_system_prompt,
+            user_message,
         )
         body["messages"] = messages
     
