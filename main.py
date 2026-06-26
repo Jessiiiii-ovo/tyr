@@ -640,7 +640,18 @@ async def build_partitioned_messages(
     state = await get_session_cache_state(session_id)
     summary_parts = state['summary_parts']
     a_start_round = state['a_start_round']
-    
+
+    # 启动/构建时发现旧摘要已经太长，先压缩一次
+    summary_changed = False
+    if len(summary_parts) > 1 or sum(len(x) for x in summary_parts) > CACHE_MAX_SUMMARY_LENGTH:
+        print(f"🧹 发现旧摘要过长: {len(summary_parts)}段/{sum(len(x) for x in summary_parts)}字，开始合并")
+        merged = await merge_summaries(summary_parts)
+        if merged:
+            summary_parts = [merged.strip()]
+            summary_changed = True
+            await save_session_cache_state(session_id, summary_parts, a_start_round)
+            print(f"🧹 旧摘要已压缩为1段/{len(summary_parts[0])}字")
+        
     if total_rounds < X:
         return await _build_basic_cached(history, base_prompt, user_message, current_user_msg)
     
@@ -674,7 +685,7 @@ async def build_partitioned_messages(
                 if merged:
                     summary_parts = [merged]
 
-                if sum(len(x) for x in summary_parts) > MAX_SUMMARY_LENGTH:
+                if sum(len(x) for x in summary_parts) > CACHE_MAX_SUMMARY_LENGTH:
                     merged2 = await merge_summaries(summary_parts)
 
                     if merged2:
