@@ -20,7 +20,7 @@ API_BASE_URL = os.getenv("API_BASE_URL", "https://openrouter.ai/api/v1/chat/comp
 MEMORY_API_KEY = os.getenv("MEMORY_API_KEY", "")
 
 # 用来提取记忆的模型（便宜的就行）
-MEMORY_MODEL = os.getenv("MEMORY_MODEL", "anthropic/claude-haiku-4")
+MEMORY_MODEL = os.getenv("MEMORY_MODEL", "claude-haiku-4-5")
 
 def get_memory_api_key() -> str:
     return MEMORY_API_KEY or API_KEY
