@@ -1037,6 +1037,54 @@ async def list_models():
     }
 
 
+def is_auxiliary_request(request: Request, body: dict, user_message: str) -> bool:
+    """
+    判断是否为标题生成、摘要命名等辅助请求。
+    辅助请求不应读取对话历史、搜索记忆、写入数据库或提取记忆。
+    """
+
+    # 最可靠：客户端主动传 Header
+    if request.headers.get("X-Skip-Memory", "").lower() == "true":
+        return True
+
+    if request.headers.get("X-Request-Type", "").lower() in {
+        "title_generation",
+        "conversation_title",
+        "auxiliary",
+    }:
+        return True
+
+    # 也支持 body 中显式声明
+    metadata = body.get("metadata") or {}
+    if isinstance(metadata, dict):
+        request_type = str(metadata.get("request_type", "")).lower()
+        if request_type in {
+            "title_generation",
+            "conversation_title",
+            "auxiliary",
+        }:
+            return True
+
+    # 兼容无法添加 Header 的客户端：识别常见标题生成提示词
+    text = user_message.lower()
+
+    title_markers = (
+        "summarize the conversation between user and assistant into a short title",
+        "the title should not exceed",
+        "reply directly with the title",
+        "summarize using zh-hans language",
+        "请为这段对话生成标题",
+        "生成一个简短标题",
+    )
+
+    marker_hits = sum(marker in text for marker in title_markers)
+
+    return (
+        marker_hits >= 2
+        and "<content>" in text
+    )
+
+
 @app.post("/v1/chat/completions")
 async def chat_completions(request: Request):
     """核心转发接口"""
@@ -1067,6 +1115,12 @@ async def chat_completions(request: Request):
                 )
             break
     
+    # ---------- 检测标题生成等辅助请求 ----------
+    auxiliary_request = is_auxiliary_request(request, body, user_message)
+
+    if auxiliary_request:
+        skip_conversation_log = True
+        print("🏷️ 检测到辅助请求：跳过分区历史、记忆检索、对话存储和记忆提取")
     # ---------- 构建 system prompt ----------
     # 先保存原始对话消息（不含 system prompt），用于记忆提取
     original_messages = [msg for msg in messages if msg.get("role") != "system"]
@@ -1080,7 +1134,7 @@ async def chat_completions(request: Request):
     session_id = str(uuid.uuid4())[:8]
     
     # ---------- 分区缓存模式 ----------
-    if CACHE_PARTITION_ENABLED:
+    if CACHE_PARTITION_ENABLED and not auxiliary_request:
         active_sid = get_active_session_id()
         if active_sid:
             session_id = active_sid
@@ -1173,12 +1227,53 @@ async def chat_completions(request: Request):
         body["messages"] = messages
     
     else:
-        # ---------- 原有逻辑：system prompt + 记忆注入 ----------
-        if SYSTEM_PROMPT or (MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message):
-            if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
-                enhanced_prompt = await build_system_prompt_with_memories(user_message)
-            else:
-                enhanced_prompt = SYSTEM_PROMPT
+        # ---------- 非分区模式或辅助请求 ----------
+        if auxiliary_request:
+            # 标题生成请求使用客户端原始 messages，
+            # 不注入角色人设，也不搜索长期记忆
+            body["messages"] = messages
+
+        else:
+            # ---------- 原有逻辑：system prompt + 记忆注入 ----------
+            current_system_prompt = await get_system_prompt()
+
+            if current_system_prompt or (
+                MEMORY_ENABLED
+                and MEMORY_EXTRACT_ENABLED
+                and user_message
+            ):
+                if MEMORY_ENABLED and MEMORY_EXTRACT_ENABLED and user_message:
+                    enhanced_prompt = await build_system_prompt_with_memories(
+                        user_message
+                    )
+                else:
+                    enhanced_prompt = current_system_prompt
+
+                if enhanced_prompt:
+                    has_system = any(
+                        msg.get("role") == "system"
+                        for msg in messages
+                    )
+
+                    if has_system:
+                        for i, msg in enumerate(messages):
+                            if msg.get("role") == "system":
+                                messages[i]["content"] = (
+                                    enhanced_prompt
+                                    + "\n\n"
+                                    + msg["content"]
+                                )
+                                break
+                    else:
+                        messages.insert(
+                            0,
+                            {
+                                "role": "system",
+                                "content": enhanced_prompt,
+                            },
+                        )
+
+            body["messages"] = messages
             
             if enhanced_prompt:
                 has_system = any(msg.get("role") == "system" for msg in messages)
@@ -1245,7 +1340,7 @@ async def chat_completions(request: Request):
     
     if is_stream:
         return StreamingResponse(
-            stream_and_capture(headers, body, session_id, user_message, model, original_messages, skip_conversation_log, tool_messages),
+            stream_and_capture(headers, body, session_id, user_message, model, original_messages, skip_conversation_log, tool_messages, auxiliary_request),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
         )
@@ -1270,7 +1365,11 @@ async def chat_completions(request: Request):
                 except (KeyError, IndexError):
                     pass
                 
-                if MEMORY_ENABLED and (user_message or tool_messages):
+                if (
+                    MEMORY_ENABLED
+                    and not auxiliary_request
+                    and (user_message or tool_messages)
+                ):
                     asyncio.create_task(
                         process_memories_background(session_id, user_message, assistant_msg, model, 
                                                     context_messages=original_messages, skip_conversation_log=skip_conversation_log,
@@ -1283,7 +1382,7 @@ async def chat_completions(request: Request):
                 return JSONResponse(status_code=response.status_code, content=response.json())
 
 
-async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None):
+async def stream_and_capture(headers: dict, body: dict, session_id: str, user_message: str, model: str, original_messages: list = None, skip_conversation_log: bool = False, tool_messages: list = None, auxiliary_request: bool = False):
     """流式响应 + 捕获完整回复（原始字节透传，确保SSE格式和thinking数据完整）"""
     full_response = []
     full_reasoning = []
@@ -1381,7 +1480,11 @@ async def stream_and_capture(headers: dict, body: dict, session_id: str, user_me
             asyncio.create_task(save_token_usage(session_id, model, pt, ct, tt))
             print(f"📊 Stream Token: {pt} + {ct} = {tt}")
     
-    if MEMORY_ENABLED and (user_message or tool_messages):
+    if (
+        MEMORY_ENABLED
+        and not auxiliary_request
+        and (user_message or tool_messages)
+    ):
         asyncio.create_task(
             process_memories_background(session_id, user_message, assistant_msg, model, 
                                         context_messages=original_messages, skip_conversation_log=skip_conversation_log,
