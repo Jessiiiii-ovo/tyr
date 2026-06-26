@@ -71,6 +71,7 @@ MEMORY_EXTRACT_ENABLED = os.getenv("MEMORY_EXTRACT_ENABLED", "true").lower() == 
 CACHE_PARTITION_ENABLED = os.getenv("CACHE_PARTITION_ENABLED", "false").lower() == "true"
 CACHE_PARTITION_X = int(os.getenv("CACHE_PARTITION_X", "15"))
 CACHE_SUMMARY_MODEL = os.getenv("CACHE_SUMMARY_MODEL", "anthropic/claude-haiku-4.5")
+CACHE_MAX_SUMMARY_LENGTH = int(os.getenv("CACHE_MAX_SUMMARY_LENGTH", "2000"))
 CACHE_PARTITION_TRIGGER = os.getenv("CACHE_PARTITION_TRIGGER", "rounds")  # rounds=按轮次 | time=按时间窗口
 CACHE_PARTITION_WINDOW = int(os.getenv("CACHE_PARTITION_WINDOW", "30"))  # 时间窗口（分钟），仅 trigger=time 时生效
 PARTITION_SESSION_ID = os.getenv("PARTITION_SESSION_ID", "")
@@ -414,7 +415,7 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
         content = msg['content'] if isinstance(msg['content'], str) else str(msg['content'])
         conversation_text += f"{role_label}: {content}\n\n"
     
-    prompt = f"""请将以下对话压缩成简洁摘要。保留关键信息（事件、决定、情感、约定），去掉日常寒暄和重复内容。用第三人称叙述，控制在300字以内。
+    prompt = f"""请将以下对话压缩成简洁摘要。最终不能超过300字, 保留关键信息（事件、决定、情感、约定），去掉日常寒暄和重复内容。用第三人称叙述，输出必须≤300字
 
 ---
 {conversation_text}
@@ -441,6 +442,10 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
                 data = response.json()
                 if "choices" in data:
                     summary = data["choices"][0]["message"]["content"].strip()
+                    if len(summary) > 1200:
+                        print("⚠️ 摘要过长，再压缩一次")
+
+                        summary = await merge_summaries([summary])
                     print(f"📝 摘要生成完成: {len(summary)}字 (压缩{len(messages)}条消息)")
                     return summary
 
@@ -449,6 +454,63 @@ async def generate_summary(messages: list, session_id: str = "") -> str:
     except Exception as e:
         print(f"⚠️ 摘要生成异常: {e}")
         return ""
+
+
+async def merge_summaries(summary_parts: list) -> str:
+    """
+    把多个摘要重新压缩成一个摘要
+    """
+    text = "\n\n".join(summary_parts)
+
+    prompt = f"""
+下面是几段历史摘要。
+
+请重新整理成一个新的摘要。
+
+要求：
+
+- 保留重要事件
+- 保留人物关系变化
+- 去掉重复内容
+- 不要按时间流水账
+- 控制在300字以内
+
+{text}
+"""
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {get_memory_api_key()}",
+            "Content-Type": "application/json",
+        }
+        if "openrouter" in API_BASE_URL:
+            headers["HTTP-Referer"] = EXTRA_REFERER
+            headers["X-Title"] = EXTRA_TITLE
+
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(
+                API_BASE_URL,
+                headers=headers,
+                json={
+                    "model": CACHE_SUMMARY_MODEL,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    "max_tokens":500,
+                },
+            )
+
+            if response.status_code == 200:
+                data=response.json()
+                return data["choices"][0]["message"]["content"].strip()
+
+    except Exception as e:
+        print(e)
+
+    return ""
 
 
 def group_by_rounds(history: list) -> list:
@@ -600,6 +662,23 @@ async def build_partitioned_messages(
         new_summary = await generate_summary(a_msgs, session_id)
         if new_summary:
             summary_parts.append(new_summary)
+
+            # 超过3段就重新压缩
+            if len(summary_parts) > 3:
+                merged = await merge_summaries(summary_parts)
+                merged = merged.strip()
+                if len(merged) > 1200:
+                    print("⚠️ merge后的摘要仍过长")
+                    merged = await merge_summaries([merged])
+
+                if merged:
+                    summary_parts = [merged]
+
+                if sum(len(x) for x in summary_parts) > MAX_SUMMARY_LENGTH:
+                    merged2 = await merge_summaries(summary_parts)
+
+                    if merged2:
+                        summary_parts = [merged2]
         
         a_start_round += X
         a_end_round = a_start_round + X
